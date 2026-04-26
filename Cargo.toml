@@ -1,0 +1,42 @@
+[package]
+name = "bradar-de"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bradar-de"
+path = "src/main.rs"
+
+[dependencies]
+# Compositor framework
+smithay = { git = "https://github.com/Smithay/smithay", features = [
+    "desktop",
+    "renderer_gl",
+    "wayland_frontend",
+    "backend_drm",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_udev",
+    "backend_session_libseat",
+    "use_system_lib",
+    "xwayland",
+]}
+
+# Event loop
+calloop = "0.13"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Config file (TOML)
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Time
+chrono = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
