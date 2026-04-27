@@ -1,91 +1,76 @@
-// ============================================================
-//  state.rs — Hlavní stav celého DE
-//  Tento struct drží VŠE co DE potřebuje
-// ============================================================
-
 use smithay::{
-    desktop::{Space, Window},
-    input::{Seat, SeatState, keyboard::KeyboardHandle, pointer::PointerHandle},
+    desktop::{Space, Window, PopupManager},
+    input::{
+        Seat, SeatState, SeatHandler,
+        keyboard::KeyboardHandle,
+        pointer::{PointerHandle, CursorImageStatus},
+    },
     reexports::{
         calloop::{LoopHandle, LoopSignal},
-        wayland_server::DisplayHandle,
+        wayland_server::{
+            DisplayHandle, Client,
+            backend::{ClientId, DisconnectReason, ClientData as ClientDataTrait},
+            protocol::wl_surface::WlSurface,
+        },
     },
-    utils::{Clock, Monotonic, Point, Logical},
+    utils::{Clock, Monotonic, Point, Logical, Serial},
     wayland::{
-        compositor::CompositorState,
-        shell::xdg::XdgShellState,
-        shm::ShmState,
+        compositor::{CompositorState, CompositorClientState, CompositorHandler, self},
+        shell::xdg::{
+            XdgShellState, XdgShellHandler, ToplevelSurface, PopupSurface,
+            PositionerState, ToplevelConfigure, PopupConfigure,
+        },
+        shm::{ShmState, ShmHandler},
         output::OutputManagerState,
+        selection::data_device::{
+            ClientDndGrabHandler, ServerDndGrabHandler, DataDeviceHandler, DataDeviceState,
+        },
+        selection::SelectionHandler,
     },
 };
 
-use crate::{
-    config::Config,
-    window::WindowManager,
-    bar::Bar,
-    keybinds::Keybinds,
-    cursor::CursorState,
-};
+use crate::config::Config;
 
-// ============================================================
-//  HLAVNÍ STAV
-// ============================================================
+// ---- Client Data ----
+#[derive(Default)]
+pub struct ClientData {
+    pub compositor_state: CompositorClientState,
+}
+
+impl ClientDataTrait for ClientData {
+    fn initialized(&self, _: ClientId) {}
+    fn disconnected(&self, _: ClientId, _: DisconnectReason) {}
+}
+
+// ---- Main State ----
 pub struct State {
-    // --------------------------------------------------------
-    //  WAYLAND INFRASTRUKTURA
-    // --------------------------------------------------------
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, State>,
     pub loop_signal: LoopSignal,
     pub clock: Clock<Monotonic>,
 
-    // --------------------------------------------------------
-    //  WAYLAND PROTOKOLY
-    // --------------------------------------------------------
+    // Protocols
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<State>,
+    pub popup_manager: PopupManager,
 
-    // --------------------------------------------------------
-    //  INPUT
-    // --------------------------------------------------------
+    // Input
     pub seat: Seat<State>,
     pub keyboard: KeyboardHandle<State>,
     pub pointer: PointerHandle<State>,
-
-    // Pozice kurzoru na obrazovce
     pub cursor_pos: Point<f64, Logical>,
 
-    // --------------------------------------------------------
-    //  SPRÁVA OKEN
-    // --------------------------------------------------------
-    pub space: Space<Window>,        // Smithay space (interní)
-    pub window_manager: WindowManager,
+    // Windows
+    pub space: Space<Window>,
 
-    // --------------------------------------------------------
-    //  DE KOMPONENTY
-    // --------------------------------------------------------
-    pub bar: Bar,
-    pub keybinds: Keybinds,
-    pub cursor_state: CursorState,
-
-    // --------------------------------------------------------
-    //  KONFIGURACE
-    // --------------------------------------------------------
+    // Config
     pub config: Config,
 
-    // --------------------------------------------------------
-    //  ROZLIŠENÍ OBRAZOVKY
-    // --------------------------------------------------------
-    pub screen_width: u32,
-    pub screen_height: u32,
-
-    // --------------------------------------------------------
-    //  OVLÁDÁNÍ
-    // --------------------------------------------------------
-    pub running: bool,  // false = ukončit DE
+    // Control
+    pub running: bool,
 }
 
 impl State {
@@ -102,25 +87,7 @@ impl State {
         output_manager_state: OutputManagerState,
         seat_state: SeatState<State>,
         config: Config,
-        screen_width: u32,
-        screen_height: u32,
     ) -> Self {
-        let bar_height = if config.bar.enabled { config.bar.height } else { 0 };
-
-        let window_manager = WindowManager::new(
-            screen_width,
-            screen_height,
-            bar_height,
-            if config.animations.enabled { config.animations.duration_ms } else { 0 },
-        );
-
-        let bar = Bar::new(config.bar.clone(), screen_width);
-
-        let keybinds = Keybinds::new(
-            config.keybinds.terminal.clone(),
-            config.keybinds.launcher.clone(),
-        );
-
         Self {
             display_handle,
             loop_handle,
@@ -131,134 +98,96 @@ impl State {
             shm_state,
             output_manager_state,
             seat_state,
+            popup_manager: PopupManager::default(),
             seat,
             keyboard,
             pointer,
             cursor_pos: Point::from((0.0, 0.0)),
             space: Space::default(),
-            window_manager,
-            bar,
-            keybinds,
-            cursor_state: CursorState::new(),
             config,
-            screen_width,
-            screen_height,
             running: true,
         }
     }
 
-    // --------------------------------------------------------
-    //  AKTUALIZACE (každý snímek)
-    // --------------------------------------------------------
-    pub fn update(&mut self) {
-        // Aktualizuj animace oken
-        self.window_manager.update();
-
-        // Aktualizuj lištu
-        let workspace = self.window_manager.active_workspace;
-        let title = self.window_manager.focused_title().map(|s| s.to_string());
-        self.bar.update(workspace, title.as_deref());
-    }
-
-    // --------------------------------------------------------
-    //  QUIT
-    // --------------------------------------------------------
     pub fn quit(&mut self) {
-        tracing::info!("Quitting DE...");
         self.running = false;
         self.loop_signal.stop();
     }
 }
 
-// ============================================================
-//  SMITHAY TRAITS
-//  Smithay vyžaduje implementaci těchto traits pro State
-// ============================================================
-
-// Compositor trait
-impl smithay::wayland::compositor::CompositorHandler for State {
+// ---- Compositor Handler ----
+impl CompositorHandler for State {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
 
-    fn client_compositor_state<'a>(
-        &self,
-        client: &'a smithay::reexports::wayland_server::Client,
-    ) -> &'a smithay::wayland::compositor::CompositorClientState {
-        &client.get_data::<crate::compositor::ClientData>().unwrap().compositor_state
+    fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        &client.get_data::<ClientData>().unwrap().compositor_state
     }
 
-    fn commit(&mut self, surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface) {
-        // Klient commitnul nový obsah — překresli
-        smithay::desktop::on_commit_buffer_handler::<Self>(surface);
+    fn commit(&mut self, surface: &WlSurface) {
+        compositor::on_commit_buffer_handler::<Self>(surface);
+        self.popup_manager.commit(surface);
     }
 }
 
-// XDG Shell trait — pro otevírání/zavírání oken
-impl smithay::wayland::shell::xdg::XdgShellHandler for State {
+// ---- XDG Shell Handler ----
+impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
     }
 
-    fn new_toplevel(&mut self, surface: smithay::wayland::shell::xdg::ToplevelSurface) {
-        // Nové okno se otevírá!
+    fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let window = Window::new_wayland_window(surface);
-        let default_w = self.config.window.default_width;
-        let default_h = self.config.window.default_height;
-        self.window_manager.add_window(window.clone(), default_w, default_h);
-        self.space.map_element(window, (0, 0), true);
+        self.space.map_element(window, (100, 100), true);
         tracing::info!("New window opened");
     }
 
-    fn toplevel_destroyed(&mut self, surface: smithay::wayland::shell::xdg::ToplevelSurface) {
-        // Okno se zavírá
+    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        let _ = self.popup_manager.track_popup(surface.into());
+    }
+
+    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        surface.send_repositioned(token);
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         tracing::info!("Window closed");
     }
 
-    fn new_popup(
-        &mut self,
-        _surface: smithay::wayland::shell::xdg::PopupSurface,
-        _positioner: smithay::wayland::shell::xdg::PositionerState,
-    ) {}
+    fn grab(&mut self, _surface: PopupSurface, _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat, _serial: Serial) {}
 
-    fn grab(
-        &mut self,
-        _surface: smithay::wayland::shell::xdg::PopupSurface,
-        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
-        _serial: smithay::utils::Serial,
-    ) {}
+    fn configure_request(&mut self, _surface: ToplevelSurface) {}
+
+    fn configure_done(&mut self, _surface: ToplevelSurface) {}
 }
 
-// SHM trait — sdílená paměť pro obsah oken
-impl smithay::wayland::shm::ShmHandler for State {
+// ---- SHM Handler ----
+impl ShmHandler for State {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
     }
 }
 
-// Seat trait — vstupní zařízení
-impl smithay::input::SeatHandler for State {
-    type KeyboardFocus = smithay::desktop::Window;
-    type PointerFocus = smithay::desktop::Window;
-    type TouchFocus = smithay::desktop::Window;
+// ---- Seat Handler ----
+impl SeatHandler for State {
+    type KeyboardFocus = WlSurface;
+    type PointerFocus = WlSurface;
+    type TouchFocus = WlSurface;
 
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
     }
 
-    fn focus_changed(
-        &mut self,
-        _seat: &Seat<Self>,
-        _focused: Option<&Self::KeyboardFocus>,
-    ) {}
-
-    fn cursor_image(
-        &mut self,
-        _seat: &Seat<Self>,
-        _image: smithay::input::pointer::CursorImageStatus,
-    ) {}
+    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
 }
 
+// ---- Delegate macros ----
 smithay::delegate_compositor!(State);
 smithay::delegate_xdg_shell!(State);
 smithay::delegate_shm!(State);
