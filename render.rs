@@ -5,10 +5,10 @@
 
 use smithay::{
     backend::renderer::{
-        gles::{GlesRenderer, GlesTexture, GlesError},
+        Color32F,
         Frame, Renderer,
     },
-    utils::{Rectangle, Size, Transform, Physical, Scale},
+    utils::{Rectangle, Size, Transform, Physical},
 };
 
 use crate::state::State;
@@ -29,8 +29,8 @@ impl Color {
         Self { r, g, b, a }
     }
 
-    pub fn to_array(&self) -> [f32; 4] {
-        [self.r, self.g, self.b, self.a]
+    pub fn to_color32f(&self) -> Color32F {
+        Color32F::new(self.r, self.g, self.b, self.a)
     }
 
     // Parsuj hex barvu "#rrggbb" nebo "#rrggbbaa"
@@ -93,12 +93,12 @@ impl DERenderer {
         frame: &mut F,
         state: &mut State,
     ) -> Result<(), F::Error> {
-        let size = Size::from((self.screen_width as i32, self.screen_height as i32));
-        let full_rect = Rectangle::from_loc_and_size((0, 0), size);
+        let size = Size::<i32, Physical>::from((self.screen_width as i32, self.screen_height as i32));
+        let full_rect = Rectangle::new((0, 0).into(), size);
 
         // 1. Vymaž obrazovku barvou pozadí
         frame.clear(
-            self.bg_color.to_array(),
+            self.bg_color.to_color32f(),
             &[full_rect],
         )?;
 
@@ -147,35 +147,23 @@ impl DERenderer {
             // Vykresli rámeček (4 obdélníky kolem okna)
             // Horní
             frame.clear(
-                border_color.to_array(),
-                &[Rectangle::from_loc_and_size(
-                    (x - bw, y - bw),
-                    (w as i32 + bw * 2, bw),
-                )],
+                border_color.to_color32f(),
+                &[Rectangle::new((x - bw, y - bw).into(), (w as i32 + bw * 2, bw).into())],
             )?;
             // Spodní
             frame.clear(
-                border_color.to_array(),
-                &[Rectangle::from_loc_and_size(
-                    (x - bw, y + h as i32),
-                    (w as i32 + bw * 2, bw),
-                )],
+                border_color.to_color32f(),
+                &[Rectangle::new((x - bw, y + h as i32).into(), (w as i32 + bw * 2, bw).into())],
             )?;
             // Levý
             frame.clear(
-                border_color.to_array(),
-                &[Rectangle::from_loc_and_size(
-                    (x - bw, y),
-                    (bw, h as i32),
-                )],
+                border_color.to_color32f(),
+                &[Rectangle::new((x - bw, y).into(), (bw, h as i32).into())],
             )?;
             // Pravý
             frame.clear(
-                border_color.to_array(),
-                &[Rectangle::from_loc_and_size(
-                    (x + w as i32, y),
-                    (bw, h as i32),
-                )],
+                border_color.to_color32f(),
+                &[Rectangle::new((x + w as i32, y).into(), (bw, h as i32).into())],
             )?;
 
             // Obsah okna vykreslí Smithay automaticky přes Space
@@ -194,12 +182,12 @@ impl DERenderer {
         state: &mut State,
     ) -> Result<(), F::Error> {
         // Pozadí lišty
-        let bar_rect = Rectangle::from_loc_and_size(
-            (0, 0),
-            (self.screen_width as i32, self.bar_height as i32),
+        let bar_rect = Rectangle::new(
+            (0, 0).into(),
+            (self.screen_width as i32, self.bar_height as i32).into(),
         );
 
-        frame.clear(self.bar_color.to_array(), &[bar_rect])?;
+        frame.clear(self.bar_color.to_color32f(), &[bar_rect])?;
 
         // Text v liště se renderuje pomocí knihovny pro text
         // (např. cosmic-text nebo rusttype)
@@ -222,9 +210,8 @@ impl DERenderer {
 
         // Jednoduchý kurzor — bílý čtverec 8x8 px
         // TODO: nahradit obrázkem kurzoru
-        let cursor_rect = Rectangle::from_loc_and_size((cx, cy), (8, 8));
-
-        frame.clear([1.0, 1.0, 1.0, 1.0], &[cursor_rect])?;
+        let cursor_rect = Rectangle::new((cx, cy).into(), (8, 8).into());
+        frame.clear(Color32F::new(1.0, 1.0, 1.0, 1.0), &[cursor_rect])?;
 
         Ok(())
     }

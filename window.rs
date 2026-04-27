@@ -71,7 +71,7 @@ impl WindowState {
     }
 
     pub fn geometry(&self) -> Rectangle<i32, Logical> {
-        Rectangle::from_loc_and_size(
+        Rectangle::new(
             Point::from((self.x, self.y)),
             Size::from((self.width as i32, self.height as i32)),
         )
